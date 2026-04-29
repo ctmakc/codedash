@@ -1,7 +1,127 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { execSync, exec } = require('child_process');
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function getProjectName(projectDir) {
+  if (!projectDir) return '';
+  const homeDir = os.homedir();
+  const normalized = projectDir.replace(/\/+$/, '');
+  if (normalized === homeDir) return '';
+  const cleaned = projectDir.replace(/\/+$/, '');
+  const parts = cleaned.split('/');
+  const name = parts[parts.length - 1] || cleaned;
+  const generic = new Set([
+    pathBasename(homeDir),
+    'home',
+    'root',
+    'workspace',
+    'projects',
+    'src',
+    'code',
+    'repo',
+  ]);
+  if (!name || name.length < 4 || generic.has(name.toLowerCase())) return '';
+  return name;
+}
+
+function pathBasename(targetPath) {
+  const cleaned = String(targetPath || '').replace(/\/+$/, '');
+  const parts = cleaned.split('/');
+  return parts[parts.length - 1] || cleaned;
+}
+
+function tokenizeHintText(text) {
+  if (!text) return [];
+  return String(text)
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(token => token.length >= 4)
+    .slice(0, 8);
+}
+
+function makeSessionTitle(sessionId, tool, projectDir, firstMessage) {
+  const project = getProjectName(projectDir) || tool;
+  const shortId = String(sessionId || '').slice(0, 8);
+  const topic = tokenizeHintText(firstMessage).slice(0, 3).join(' ');
+  const suffix = topic ? ` ${topic}` : '';
+  return `codedash ${tool} ${project} ${shortId}${suffix}`.trim();
+}
+
+function buildLinuxBashCommand(fullCmd, title) {
+  if (!title) return `${fullCmd}; exec bash`;
+  const safeTitle = String(title).replace(/"/g, '\\"');
+  return `printf "\\033]0;${safeTitle}\\007"; export PROMPT_COMMAND='printf "\\033]0;${safeTitle}\\007"'; ${fullCmd}; exec bash`;
+}
+
+function parseLinuxWindows() {
+  try {
+    const output = execSync('wmctrl -lp', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    return output
+      .split('\n')
+      .map(line => {
+        const match = line.match(/^(\S+)\s+(-?\d+)\s+(\d+)\s+\S+\s+(.*)$/);
+        if (!match) return null;
+        return {
+          id: match[1],
+          desktop: parseInt(match[2], 10),
+          pid: parseInt(match[3], 10),
+          title: match[4] || '',
+        };
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function scoreLinuxWindow(windowTitle, hints) {
+  const title = String(windowTitle || '').toLowerCase();
+  if (!title) return 0;
+
+  if (!title.includes('codedash')) return 0;
+  if (hints.sessionId && title.includes(hints.sessionId)) return 200;
+  if (hints.shortId && title.includes(hints.shortId)) return 120;
+  return 0;
+}
+
+function focusExistingLinuxWindow(sessionId, tool, projectDir, firstMessage) {
+  const hints = {
+    sessionId: String(sessionId || '').toLowerCase(),
+    shortId: String(sessionId || '').slice(0, 8).toLowerCase(),
+    projectName: getProjectName(projectDir).toLowerCase(),
+    tool,
+    messageTokens: tokenizeHintText(firstMessage),
+  };
+
+  const windows = parseLinuxWindows();
+  const ranked = windows
+    .map(win => ({ ...win, score: scoreLinuxWindow(win.title, hints) }))
+    .sort((a, b) => b.score - a.score);
+
+  const best = ranked[0];
+  if (!best || best.score < 120) return null;
+
+  try {
+    const helperPath = path.join(__dirname, 'focus_window.py');
+    const envPrefix = [
+      process.env.DISPLAY ? `DISPLAY=${shellQuote(process.env.DISPLAY)}` : '',
+      process.env.XAUTHORITY ? `XAUTHORITY=${shellQuote(process.env.XAUTHORITY)}` : '',
+      process.env.DBUS_SESSION_BUS_ADDRESS ? `DBUS_SESSION_BUS_ADDRESS=${shellQuote(process.env.DBUS_SESSION_BUS_ADDRESS)}` : '',
+    ].filter(Boolean).join(' ');
+    const focusCmd = `${envPrefix ? `${envPrefix} ` : ''}python3 ${shellQuote(helperPath)} ${best.id}`;
+    exec(`bash -lc ${shellQuote(`sleep 0.2; ${focusCmd}`)}`);
+    return { action: 'focused', windowId: best.id, windowTitle: best.title, score: best.score };
+  } catch {
+    return null;
+  }
+}
 
 // ── Detect available terminals ──────────────────────────────
 
@@ -37,6 +157,7 @@ function detectTerminals() {
     } catch {}
   } else if (platform === 'linux') {
     const linuxTerms = [
+      { id: 'xfce4-terminal', name: 'XFCE Terminal', cmd: 'xfce4-terminal' },
       { id: 'gnome-terminal', name: 'GNOME Terminal', cmd: 'gnome-terminal' },
       { id: 'konsole', name: 'Konsole', cmd: 'konsole' },
       { id: 'kitty', name: 'Kitty', cmd: 'kitty' },
@@ -65,7 +186,7 @@ function detectTerminals() {
 
 // ── Terminal launch ─────────────────────────────────────────
 
-function openInTerminal(sessionId, tool, flags, projectDir, terminalId) {
+function openInTerminal(sessionId, tool, flags, projectDir, terminalId, firstMessage = '') {
   const skipPerms = flags.includes('skip-permissions');
   let cmd;
 
@@ -79,6 +200,7 @@ function openInTerminal(sessionId, tool, flags, projectDir, terminalId) {
   const cdPart = projectDir ? `cd ${JSON.stringify(projectDir)} && ` : '';
   const fullCmd = cdPart + cmd;
   const escapedCmd = fullCmd.replace(/"/g, '\\"');
+  const title = makeSessionTitle(sessionId, tool, projectDir, firstMessage);
 
   const platform = process.platform;
 
@@ -123,25 +245,37 @@ function openInTerminal(sessionId, tool, flags, projectDir, terminalId) {
         break;
       }
     }
+    return { action: 'launched', mode: 'new_terminal' };
   } else if (platform === 'linux') {
+    const focused = focusExistingLinuxWindow(sessionId, tool, projectDir, firstMessage);
+    if (focused) return focused;
+
+    const quotedCmd = shellQuote(buildLinuxBashCommand(fullCmd, title));
+    const quotedTitle = shellQuote(title);
+    const quotedProject = projectDir ? shellQuote(projectDir) : '';
+
     switch (terminalId) {
+      case 'xfce4-terminal':
+        exec(`xfce4-terminal --disable-server --title=${quotedTitle}${projectDir ? ` --working-directory=${quotedProject}` : ''} --command=${shellQuote(`bash -lc ${quotedCmd}`)}`);
+        break;
       case 'kitty':
-        exec(`kitty bash -c '${fullCmd}; exec bash'`);
+        exec(`kitty --title ${quotedTitle} bash -lc ${quotedCmd}`);
         break;
       case 'alacritty':
-        exec(`alacritty -e bash -c '${fullCmd}; exec bash'`);
+        exec(`alacritty --title ${quotedTitle} -e bash -lc ${quotedCmd}`);
         break;
       case 'konsole':
-        exec(`konsole -e bash -c '${fullCmd}; exec bash'`);
+        exec(`konsole${projectDir ? ` --workdir ${quotedProject}` : ''} -p tabtitle=${quotedTitle} -e bash -lc ${quotedCmd}`);
         break;
       case 'xterm':
-        exec(`xterm -e bash -c '${fullCmd}; exec bash'`);
+        exec(`xterm -T ${quotedTitle} -e bash -lc ${quotedCmd}`);
         break;
       case 'gnome-terminal':
       default:
-        exec(`gnome-terminal -- bash -c "${fullCmd}; exec bash"`);
+        exec(`gnome-terminal --title=${quotedTitle}${projectDir ? ` --working-directory=${quotedProject}` : ''} -- bash -lc ${quotedCmd}`);
         break;
     }
+    return { action: 'launched', mode: 'new_terminal', title };
   } else {
     switch (terminalId) {
       case 'powershell':
@@ -154,6 +288,7 @@ function openInTerminal(sessionId, tool, flags, projectDir, terminalId) {
         exec(`start cmd /k "${fullCmd}"`);
         break;
     }
+    return { action: 'launched', mode: 'new_terminal' };
   }
 }
 

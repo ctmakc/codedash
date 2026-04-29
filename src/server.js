@@ -55,9 +55,16 @@ function startServer(port, openBrowser = true) {
     else if (req.method === 'POST' && pathname === '/api/launch') {
       readBody(req, body => {
         try {
-          const { sessionId, tool, flags, project, terminal } = JSON.parse(body);
-          openInTerminal(sessionId, tool || 'claude', flags || [], project || '', terminal || '');
-          json(res, { ok: true });
+          const { sessionId, tool, flags, project, terminal, firstMessage } = JSON.parse(body);
+          const result = openInTerminal(
+            sessionId,
+            tool || 'claude',
+            flags || [],
+            project || '',
+            terminal || '',
+            firstMessage || ''
+          );
+          json(res, { ok: true, result: result || { action: 'launched' } });
         } catch (e) {
           json(res, { ok: false, error: e.message }, 400);
         }

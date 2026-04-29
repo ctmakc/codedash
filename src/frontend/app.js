@@ -74,6 +74,15 @@ function escHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function escJs(s) {
+  if (!s) return '';
+  return String(s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
+}
+
 function showToast(msg) {
   const el = document.getElementById('toast');
   if (!el) return;
@@ -310,6 +319,7 @@ function renderCard(s, idx) {
   html += '<span class="tool-badge ' + toolClass + '">' + escHtml(s.tool) + '</span>';
   html += '<span class="card-project" style="color:' + projColor + '">' + escHtml(projName) + '</span>';
   html += '<span class="card-time">' + timeAgo(s.last_ts) + '</span>';
+  html += '<button class="card-focus-btn" onclick="event.stopPropagation();launchSession(\'' + escJs(s.id) + '\',\'' + escJs(s.tool) + '\',\'' + escJs(s.project || '') + '\',\'' + escJs(s.first_message || '') + '\')" title="Focus this session">Focus</button>';
   if (costStr) {
     html += '<span class="cost-badge">' + costStr + '</span>';
   }
@@ -365,6 +375,7 @@ function renderListCard(s, idx) {
   html += '<span class="list-msg">' + escHtml((s.first_message || '').slice(0, 80)) + '</span>';
   html += '<span class="list-meta">' + s.messages + ' msgs</span>';
   html += '<span class="list-time">' + timeAgo(s.last_ts) + '</span>';
+  html += '<button class="card-focus-btn list-focus-btn" onclick="event.stopPropagation();launchSession(\'' + escJs(s.id) + '\',\'' + escJs(s.tool) + '\',\'' + escJs(s.project || '') + '\',\'' + escJs(s.first_message || '') + '\')" title="Focus this session">Focus</button>';
   html += '<button class="star-btn' + (isStarred ? ' active' : '') + '" onclick="event.stopPropagation();toggleStar(\'' + s.id + '\')">&#9733;</button>';
   html += '</div>';
   return html;
@@ -730,13 +741,13 @@ async function openDetail(s) {
 
   // Action buttons
   infoHtml += '<div class="detail-actions">';
-  infoHtml += '<button class="launch-btn" onclick="launchSession(\'' + s.id + '\',\'' + escHtml(s.tool) + '\',\'' + escHtml(s.project || '') + '\')">Resume in Terminal</button>';
-  infoHtml += '<button class="launch-btn btn-secondary" onclick="copyResume(\'' + s.id + '\',\'' + escHtml(s.tool) + '\')">Copy Command</button>';
+  infoHtml += '<button class="launch-btn" onclick="launchSession(\'' + escJs(s.id) + '\',\'' + escJs(s.tool) + '\',\'' + escJs(s.project || '') + '\',\'' + escJs(s.first_message || '') + '\')">Open / Focus Terminal</button>';
+  infoHtml += '<button class="launch-btn btn-secondary" onclick="copyResume(\'' + escJs(s.id) + '\',\'' + escJs(s.tool) + '\')">Copy Command</button>';
   if (s.has_detail) {
-    infoHtml += '<button class="launch-btn btn-secondary" onclick="exportMd(\'' + s.id + '\',\'' + escHtml(s.project || '') + '\')">Export MD</button>';
+    infoHtml += '<button class="launch-btn btn-secondary" onclick="exportMd(\'' + escJs(s.id) + '\',\'' + escJs(s.project || '') + '\')">Export MD</button>';
   }
-  infoHtml += '<button class="star-btn detail-star' + (isStarred ? ' active' : '') + '" onclick="toggleStar(\'' + s.id + '\')">&#9733; ' + (isStarred ? 'Starred' : 'Star') + '</button>';
-  infoHtml += '<button class="launch-btn btn-delete" onclick="showDeleteConfirm(\'' + s.id + '\',\'' + escHtml(s.project || '') + '\')">Delete</button>';
+  infoHtml += '<button class="star-btn detail-star' + (isStarred ? ' active' : '') + '" onclick="toggleStar(\'' + escJs(s.id) + '\')">&#9733; ' + (isStarred ? 'Starred' : 'Star') + '</button>';
+  infoHtml += '<button class="launch-btn btn-delete" onclick="showDeleteConfirm(\'' + escJs(s.id) + '\',\'' + escJs(s.project || '') + '\')">Delete</button>';
   infoHtml += '</div>';
 
   body.innerHTML = infoHtml + '<div class="detail-messages"><div class="loading">Loading messages...</div></div><div class="detail-commits"></div>';
@@ -805,7 +816,7 @@ async function loadGitCommits(project, fromTs, toTs) {
   }
 }
 
-function launchSession(sessionId, tool, project) {
+function launchSession(sessionId, tool, project, firstMessage) {
   var terminal = localStorage.getItem('codedash-terminal') || '';
   fetch('/api/launch', {
     method: 'POST',
@@ -815,12 +826,20 @@ function launchSession(sessionId, tool, project) {
       tool: tool,
       flags: [],
       project: project,
-      terminal: terminal
+      terminal: terminal,
+      firstMessage: firstMessage || ''
     })
   }).then(function(resp) {
     return resp.json();
   }).then(function(data) {
-    if (data.ok) showToast('Launched in terminal');
+    if (data.ok) {
+      var result = data.result || {};
+      if (result.action === 'focused') {
+        showToast('Focused existing terminal');
+      } else {
+        showToast('Opened new terminal for session');
+      }
+    }
     else showToast('Launch failed: ' + (data.error || 'unknown'));
   }).catch(function() {
     showToast('Launch failed');
